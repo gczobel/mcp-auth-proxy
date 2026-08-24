@@ -1,0 +1,23 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in *.go) gofmt -s -w \"$f\" ;; esac; } 2>&1 || true",
+            "timeout": 30,
+            "statusMessage": "Running gofmt..."
+          },
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | { read -r f; case \"$f\" in *.go) go vet ./... ;; esac; } 2>&1",
+            "timeout": 120,
+            "statusMessage": "Running go vet..."
+          }
+        ]
+      }
+    ]
+  }
+}
