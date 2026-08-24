@@ -1,5 +1,26 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit*)",
+            "command": "repo=$(git remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\\.git)?$#\\1#; s/\\.git$//'); branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); [ \"$branch\" = \"main\" ] && exit 0; [ -z \"$repo\" ] && exit 0; state=$(gh pr view \"$branch\" --repo \"$repo\" --json state --jq '.state' 2>/dev/null); if [ \"$state\" = \"MERGED\" ] || [ \"$state\" = \"CLOSED\" ]; then jq -n --arg branch \"$branch\" --arg state \"$state\" --arg repo \"$repo\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:(\"Branch \" + $branch + \" already has a \" + $state + \" PR on \" + $repo + \" — committing here will strand the work. Fetch origin/main and create a fresh branch instead.\")}}'; fi",
+            "timeout": 15,
+            "statusMessage": "Checking branch PR state..."
+          },
+          {
+            "type": "command",
+            "if": "Bash(git push*)",
+            "command": "repo=$(git remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/]+)(\\.git)?$#\\1#; s/\\.git$//'); branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); [ \"$branch\" = \"main\" ] && exit 0; [ -z \"$repo\" ] && exit 0; state=$(gh pr view \"$branch\" --repo \"$repo\" --json state --jq '.state' 2>/dev/null); if [ \"$state\" = \"MERGED\" ] || [ \"$state\" = \"CLOSED\" ]; then jq -n --arg branch \"$branch\" --arg state \"$state\" --arg repo \"$repo\" '{hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:(\"Branch \" + $branch + \" already has a \" + $state + \" PR on \" + $repo + \" — pushing here will strand the work. Fetch origin/main and create a fresh branch instead.\")}}'; fi",
+            "timeout": 15,
+            "statusMessage": "Checking branch PR state..."
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit",
