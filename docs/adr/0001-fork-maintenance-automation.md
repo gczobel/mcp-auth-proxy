@@ -1,0 +1,22 @@
+---
+status: accepted
+---
+
+# Automated maintenance for the personal fork
+
+This fork (`gczobel/mcp-auth-proxy`) is a personal fork of `sigbit/mcp-auth-proxy`, not a publish target — nobody consumes releases, binaries, or docs from it. We set it up to maintain itself with minimal manual work: GitHub-native security scanning (Dependabot alerts, secret scanning, CodeQL), automatic version updates with policy-gated auto-merge (patch/minor only, majors held for review), a branch protection ruleset requiring CI to pass, and Claude Code tooling (agent skill config, hooks, a security-reviewer subagent) scoped to this repo. The workflows that only make sense for a distribution target — `Build` (six-platform release binaries), `Docs` (Docusaurus deploy), `Release` (release-please version bumps) — are disabled rather than deleted, since nothing external depends on them here but a future need to publish from this fork shouldn't require rebuilding them from scratch.
+
+## Considered options
+
+- **Dependabot metadata via `dependabot/fetch-metadata`, rejected for the backlog sweep.** That action is built around reading the `pull_request` event context (title, commit trailers) and its behavior on a `schedule` trigger with no PR in context wasn't something we could verify confidently. Instead, the daily sweep parses the major-version digit straight out of Dependabot's `bump X from A to B` PR title — cruder, but auditable and testable without guessing at third-party action internals.
+- **Squash-merge only, not a hard requirement — a consequence of `required_signatures`.** The ruleset originally required signed commits reaching `main`. A regular "Create a merge commit" preserves the original (unsigned, locally-authored) commits as parents, so verification failed; "Squash and merge" collapses the branch into one new commit that GitHub creates and signs itself, so it passed. `required_signatures` was later removed from the ruleset, which is presumably why plain merges started working again — noted here in case that policy is revisited.
+- **Codecov project-coverage checks and PR comments: declined for now.** A required coverage check on top of `check`/`test` risks stalling patch/minor auto-merges if Codecov's own check state flakes or sits pending — exactly the friction this setup was built to remove. PR comments would also fire on every Dependabot PR, adding bot noise to the majority of this repo's PR volume. Coverage is still visible on-demand at Codecov's dashboard without either cost.
+
+## Consequences / gotchas discovered
+
+- **GitHub disables Actions on forks by default**, independent of what the `actions/permissions` API reports. There's no API to flip it — the repo owner has to click through the consent banner on the Actions tab once. Nothing runs (not even on a `pull_request` event) until that happens.
+- **`gh pr create` and `gh pr view <branch>` both default to the fork's *upstream parent* repo when a fork relationship exists**, not `origin`. Every call needs an explicit `--repo <owner>/<repo>`, resolved from `git remote get-url origin` rather than assumed. Learned the hard way: a PR was opened, and had to be closed, on `sigbit/mcp-auth-proxy` before this was caught.
+- **A newly-added `pull_request`-triggered workflow does not retroactively attach to already-open PRs.** It only runs on a new PR event (opened/synchronize/reopened). This is why the daily backlog-sweep workflow exists at all — six Dependabot PRs opened before the event-triggered auto-merge workflow existed would otherwise sit forever with `autoMergeRequest: null`.
+- **Squash-merging a PR does not move the feature branch's own ref.** Git sees no divergence, so a follow-up `git push` to that branch succeeds as a clean fast-forward — silently stranding the commit, since nothing reopens the merged PR. This happened twice in the session that set this up, which is why `.claude/settings.json` has a `PreToolUse` hook blocking `git commit`/`git push` when the current branch's PR is already `MERGED`/`CLOSED` (checked via `gh pr view --repo <owner>/<repo>`, not local git state — git alone can't see this).
+- **Codecov no longer accepts tokenless uploads for public repos** (policy change after a 2024 incident) — a `CODECOV_TOKEN` repo secret is required even though the repo is public and free-tier.
+- **`delete_branch_on_merge` was off by default** on the fork; branches from merged PRs accumulated until it was turned on explicitly.
