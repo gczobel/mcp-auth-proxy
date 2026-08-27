@@ -81,14 +81,16 @@ case "$uid" in
 esac
 
 echo "==> tool-schema relay over /mcp (#178, deferred hard assert)"
-key="$REPO_ROOT/e2e/data/private_key.pem"
-# The proxy writes the key as root with 0600 perms (until #19 changes the
-# container user), so read it through exec rather than through the bind mount.
+# The proxy writes its key as root with 0600 perms (until #19 changes the
+# container user), so extract it through exec into a runner-writable temp
+# file rather than reading the container filesystem directly.
+key="$(mktemp)"
 "${COMPOSE[@]}" exec -T proxy cat /data/private_key.pem > "$key"
 if [ ! -s "$key" ]; then
-  fail "proxy did not generate $key"
+  fail "proxy did not generate /data/private_key.pem"
 fi
 token="$(go run "$REPO_ROOT/e2e/tokengen" -key "$key" -iss "$BASE")"
+rm -f "$key"
 
 resp="$(curl -fsS -X POST "$BASE/mcp" \
   -H "Authorization: Bearer $token" \

@@ -31,7 +31,5 @@ services:
     volumes:
       # stdio backend fixture, built by CI before `docker compose up`.
       - ./bin/testserver:/usr/local/bin/testserver:ro
-      # Writable data dir so the proxy can persist its generated keys.
-      - ./data:/data
     ports:
       - "8080:80"
