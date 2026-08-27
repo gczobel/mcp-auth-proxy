@@ -46,10 +46,19 @@ func NewProxyRouter(
 
 const (
 	OauthProtectedResourceEndpoint = "/.well-known/oauth-protected-resource"
+	// MCPResourcePath is the MCP endpoint path served by the stdio/streamable
+	// backend (see pkg/backend server.WithEndpointPath("/mcp")). The
+	// path-derived protected-resource document (RFC 9728 §3.1) is published
+	// for this exact path so strict clients that connect to
+	// <external-url>/mcp receive metadata whose resource matches, instead of
+	// falling back to the root document (whose resource is <external-url>)
+	// and rejecting the mismatch (§3.3).
+	MCPResourcePath = "/mcp"
 )
 
 func (p *ProxyRouter) SetupRoutes(router gin.IRouter) {
 	router.GET(OauthProtectedResourceEndpoint, p.handleProtectedResource)
+	router.GET(OauthProtectedResourceEndpoint+MCPResourcePath, p.handleMCPProtectedResource)
 	router.Use(p.handleProxy)
 }
 
@@ -61,6 +70,13 @@ type protectedResourceResponse struct {
 func (p *ProxyRouter) handleProtectedResource(c *gin.Context) {
 	c.JSON(http.StatusOK, protectedResourceResponse{
 		Resource:             p.externalURL,
+		AuthorizationServers: []string{p.externalURL},
+	})
+}
+
+func (p *ProxyRouter) handleMCPProtectedResource(c *gin.Context) {
+	c.JSON(http.StatusOK, protectedResourceResponse{
+		Resource:             strings.TrimSuffix(p.externalURL, "/") + MCPResourcePath,
 		AuthorizationServers: []string{p.externalURL},
 	})
 }
