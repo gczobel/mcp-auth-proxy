@@ -82,6 +82,9 @@ esac
 
 echo "==> tool-schema relay over /mcp (#178, deferred hard assert)"
 key="$REPO_ROOT/e2e/data/private_key.pem"
+# The proxy writes the key as root with 0600 perms (until #19 changes the
+# container user), so read it through exec rather than through the bind mount.
+"${COMPOSE[@]}" exec -T proxy cat /data/private_key.pem > "$key"
 if [ ! -s "$key" ]; then
   fail "proxy did not generate $key"
 fi
