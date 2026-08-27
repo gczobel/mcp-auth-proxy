@@ -89,7 +89,9 @@ key="$(mktemp)"
 if [ ! -s "$key" ]; then
   fail "proxy did not generate /data/private_key.pem"
 fi
-token="$(go run "$REPO_ROOT/e2e/tokengen" -key "$key" -iss "$BASE")"
+# The proxy normalizes EXTERNAL_URL to a trailing slash (main.go), and
+# validates iss/aud against that exact string — mint with "$BASE/".
+token="$(go run "$REPO_ROOT/e2e/tokengen" -key "$key" -iss "$BASE/")"
 rm -f "$key"
 
 resp="$(curl -fsS -X POST "$BASE/mcp" \

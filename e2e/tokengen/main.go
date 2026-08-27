@@ -17,7 +17,7 @@ import (
 
 func main() {
 	keyPath := flag.String("key", "", "path to the proxy's PEM private key (PKCS8)")
-	issuer := flag.String("iss", "http://localhost:8080", "external URL the proxy runs at (iss + aud)")
+	issuer := flag.String("iss", "http://localhost:8080/", "external URL the proxy runs at (iss + aud); must match the proxy's normalized external URL (trailing slash)")
 	flag.Parse()
 
 	if *keyPath == "" {
