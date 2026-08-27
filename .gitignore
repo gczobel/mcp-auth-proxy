@@ -34,6 +34,10 @@ go.work.sum
 # env file
 .env
 
+# Local build artifacts and Go caches (sandbox keeps $HOME caches read-only)
+bin/
+.go-cache/
+
 # Editor/IDE
 .idea/
 # .vscode/

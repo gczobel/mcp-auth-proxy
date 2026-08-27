@@ -190,4 +190,12 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048
 | `--http-streaming-only`         | `HTTP_STREAMING_ONLY`         | `false`     | Reject SSE (GET) requests and keep the backend operating in HTTP streaming-only mode                  |
 | `--trusted-proxies`             | `TRUSTED_PROXIES`             | -           | Comma-separated list of trusted proxies (IP addresses or CIDR ranges)                                 |
 
+### Well-known metadata endpoints
+
+The proxy publishes OAuth discovery documents for MCP clients that fetch them before authenticating:
+
+- `/.well-known/oauth-authorization-server` — OAuth Authorization Server Metadata (RFC 8414).
+- `/.well-known/oauth-protected-resource` — Protected Resource Metadata (RFC 9728) for the root URL.
+- `/.well-known/oauth-protected-resource/mcp` — Protected Resource Metadata for the `/mcp` endpoint (RFC 9728 §3.1 path-derived location). Clients that connect to `<external-url>/mcp` (e.g. gemini-cli, Google Antigravity) use this document and require its `resource` field to match the URL they connected to. The root document is kept for clients that tolerate the root resource.
+
 For practical configuration examples including environment variables, Docker Compose, and Kubernetes deployments, see the [Configuration Examples](./examples.md) page.
