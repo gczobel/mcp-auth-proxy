@@ -245,12 +245,16 @@ func (a *IDPRouter) handleAuthorizationReturn(c *gin.Context) {
 
 	ar, err := a.repo.GetAuthorizeRequest(ctx, arID)
 	if err != nil {
-		// The authorize request may already have been consumed by a concurrent
-		// POST (see ADR-0002) or expired. Fall back to the replay-or-invalid
-		// path so the browser gets the cached redirect when available, or an
-		// HTML error page instead of raw JSON.
+		// The session still lists this authorize request but its store record
+		// is gone — consumed by a concurrent POST (ADR-0002) or expired. Re-serve
+		// the cached redirect when the replay window has one, otherwise an HTML
+		// error page instead of raw JSON.
 		a.logger.Error("Failed to get authorize requester", zap.Error(err))
-		a.replayOrInvalid(c, session, arID)
+		if redirectURL, ok := getReplayEntry(session, arID); ok {
+			c.Redirect(http.StatusSeeOther, redirectURL)
+			return
+		}
+		a.writeInvalidAuthorizationSession(c)
 		return
 	}
 	defer func() {

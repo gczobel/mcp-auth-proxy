@@ -2,6 +2,7 @@ package idp
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -372,6 +373,78 @@ func testAuthFlowWithURL(t *testing.T, serverURL, authURL string) *url.URL {
 
 func TestReplayWindowDefaultIsTenSeconds(t *testing.T) {
 	require.Equal(t, 10*time.Second, replayWindow, "replay window default should stay 10s (design decision from issue #16)")
+}
+
+func TestAuthorizationReturnFormHandlesMissingAuthorizeRequest(t *testing.T) {
+	server, repo, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	// The session still holds the AR id, but the stored authorize request is
+	// gone (TTL expiry or the concurrent-consumption race from ADR-0002).
+	arID := strings.TrimPrefix(location, "/.idp/auth/")
+	require.NoError(t, repo.DeleteAuthorizeRequest(context.Background(), arID))
+
+	resp, err := client.Get(server.URL + location)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := resp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "missing authorize request should yield an HTML error page")
+}
+
+func TestAuthorizationReturnHandlesMissingAuthorizeRequest(t *testing.T) {
+	server, repo, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	arID := strings.TrimPrefix(location, "/.idp/auth/")
+	require.NoError(t, repo.DeleteAuthorizeRequest(context.Background(), arID))
+
+	resp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := resp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "missing authorize request should yield an HTML error page")
 }
 
 func TestAuthorizationReturnReplayExpiresAfterWindow(t *testing.T) {
