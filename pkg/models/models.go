@@ -23,6 +23,7 @@ type Request struct {
 
 type Client struct {
 	ID             string
+	Name           string
 	Secret         string
 	RotatedSecrets []string
 	RedirectURIs   []string

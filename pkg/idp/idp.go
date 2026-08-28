@@ -1,10 +1,12 @@
 package idp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"html/template"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -103,7 +105,21 @@ const (
 	OauthAuthorizationServerEndpoint = "/.well-known/oauth-authorization-server"
 	JWKSEndpoint                     = "/.well-known/jwks.json"
 	sessionKeyAuthorizeRequestIDs    = "idp_authorize_request_ids"
+	sessionKeyAuthorizeReplay        = "idp_authorize_replay"
 )
+
+// replayWindow bounds how long an already-answered authorization return stays
+// replayable from the same session. Repeat GET/POSTs within the window (browser
+// form resubmission, Claude.ai re-navigation) re-serve the same redirect with
+// the same code instead of failing with an invalid-session error.
+var replayWindow = 10 * time.Second
+
+// replayEntry is a cached authorization response, keyed by authorize-request id
+// in the browser session. See ADR-0002 for the accepted concurrency semantics.
+type replayEntry struct {
+	RedirectURL string    `json:"redirect_url"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
 
 func (a *IDPRouter) SetupRoutes(router gin.IRouter) {
 	router.GET(AuthorizationEndpoint, a.handleAuth)
@@ -158,28 +174,83 @@ func (a *IDPRouter) handleAuth(c *gin.Context) {
 }
 
 func (a *IDPRouter) handleAuthorizationReturnForm(c *gin.Context) {
-	arID := c.Param("ar_id")
-	if !hasAuthorizeRequestID(sessions.Default(c), arID) {
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid authorization session"})
-		return
-	}
-
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(`<!doctype html><html><body><form method="post"><button type="submit">Authorize</button></form></body></html>`))
-}
-
-func (a *IDPRouter) handleAuthorizationReturn(c *gin.Context) {
 	ctx := c.Request.Context()
 	arID := c.Param("ar_id")
 	session := sessions.Default(c)
-	if !hasAuthorizeRequestID(session, arID) {
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid authorization session"})
+	if a.replayOrInvalid(c, session, arID) {
 		return
 	}
 
 	ar, err := a.repo.GetAuthorizeRequest(ctx, arID)
 	if err != nil {
 		a.logger.Error("Failed to get authorize requester", zap.Error(err))
+		a.writeInvalidAuthorizationSession(c)
+		return
+	}
+
+	// Show the redirect URI host (mandated by the MCP spec's security
+	// considerations) and the client name when one was registered, so the
+	// owner can see who is requesting access.
+	host := ""
+	if redirectURI := ar.GetRedirectURI(); redirectURI != nil {
+		host = redirectURI.Hostname()
+	}
+	name := ""
+	if clientID := ar.GetClient().GetID(); clientID != "" {
+		if clientName, err := a.repo.GetClientName(ctx, clientID); err == nil {
+			name = clientName
+		}
+	}
+	if name == "" {
+		name = host
+	}
+
+	var buf bytes.Buffer
+	if err := consentFormTmpl.Execute(&buf, consentFormData{Name: name, Host: host}); err != nil {
+		a.logger.Error("Failed to render consent form", zap.Error(err))
 		c.AbortWithStatusJSON(500, gin.H{"error": "Internal Server Error"})
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", buf.Bytes())
+}
+
+type consentFormData struct {
+	Name string
+	Host string
+}
+
+var consentFormTmpl = template.Must(template.New("consent").Parse(consentFormTemplate))
+
+const consentFormTemplate = `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Authorize access</title></head>
+<body>
+<h1>Authorize access to your MCP server</h1>
+<p>{{.Name}} is requesting access.</p>
+<p>After authorizing, you'll be redirected to {{.Host}} with an authorization code.</p>
+<form method="post">
+  <button type="submit" name="decision" value="authorize">Authorize</button>
+  <button type="submit" name="decision" value="deny">Deny</button>
+</form>
+</body>
+</html>`
+
+func (a *IDPRouter) handleAuthorizationReturn(c *gin.Context) {
+	ctx := c.Request.Context()
+	arID := c.Param("ar_id")
+	session := sessions.Default(c)
+	if a.replayOrInvalid(c, session, arID) {
+		return
+	}
+
+	ar, err := a.repo.GetAuthorizeRequest(ctx, arID)
+	if err != nil {
+		// The authorize request may already have been consumed by a concurrent
+		// POST (see ADR-0002) or expired. Fall back to the replay-or-invalid
+		// path so the browser gets the cached redirect when available, or an
+		// HTML error page instead of raw JSON.
+		a.logger.Error("Failed to get authorize requester", zap.Error(err))
+		a.replayOrInvalid(c, session, arID)
 		return
 	}
 	defer func() {
@@ -187,6 +258,17 @@ func (a *IDPRouter) handleAuthorizationReturn(c *gin.Context) {
 			a.logger.Error("Failed to delete authorize requester", zap.Error(err))
 		}
 	}()
+
+	// Deny (RFC 6749 §4.1.2.1): redirect the user-agent back to the client's
+	// redirect URI with error=access_denied instead of issuing a code.
+	if c.PostForm("decision") == "deny" {
+		removeAuthorizeRequestID(session, arID)
+		if err := session.Save(); err != nil {
+			a.logger.Error("Failed to remove authorize request from session", zap.Error(err))
+		}
+		a.provider.WriteAuthorizeError(ctx, c.Writer, ar, fosite.ErrAccessDenied)
+		return
+	}
 
 	for _, scope := range ar.GetRequestedScopes() {
 		ar.GrantScope(scope)
@@ -224,6 +306,40 @@ func (a *IDPRouter) handleAuthorizationReturn(c *gin.Context) {
 	}
 
 	a.provider.WriteAuthorizeResponse(ctx, c.Writer, ar, response)
+
+	// Cache the issued redirect for the replay window so a repeat submission
+	// from the same session re-serves the same code instead of 403ing.
+	if redirectURL := c.Writer.Header().Get("Location"); redirectURL != "" {
+		setReplayEntry(session, arID, replayEntry{
+			RedirectURL: redirectURL,
+			ExpiresAt:   time.Now().Add(replayWindow),
+		})
+		if err := session.Save(); err != nil {
+			a.logger.Error("Failed to save authorize replay entry in session", zap.Error(err))
+		}
+	}
+}
+
+// replayOrInvalid reports whether the request must not proceed: either it is a
+// repeat submission from the same session within the replay window (served the
+// cached redirect with the same code — browser form-resubmission heuristic or
+// Claude.ai re-navigation), or the authorize request is not bound to this
+// session at all (an HTML error page). It writes the response and returns true
+// when the caller should stop.
+func (a *IDPRouter) replayOrInvalid(c *gin.Context, session sessions.Session, arID string) bool {
+	if hasAuthorizeRequestID(session, arID) {
+		return false
+	}
+	if redirectURL, ok := getReplayEntry(session, arID); ok {
+		c.Redirect(http.StatusSeeOther, redirectURL)
+		return true
+	}
+	a.writeInvalidAuthorizationSession(c)
+	return true
+}
+
+func (a *IDPRouter) writeInvalidAuthorizationSession(c *gin.Context) {
+	c.Data(http.StatusForbidden, "text/html; charset=utf-8", []byte(`<!doctype html><html><body><h1>Invalid authorization session</h1><p>This authorization request is invalid or has expired. Please start the OAuth flow again.</p></body></html>`))
 }
 
 func authorizeRequestIDs(session sessions.Session) []string {
@@ -271,6 +387,50 @@ func removeAuthorizeRequestID(session sessions.Session, arID string) {
 	}
 	data, _ := json.Marshal(remaining)
 	session.Set(sessionKeyAuthorizeRequestIDs, string(data))
+}
+
+func replayEntries(session sessions.Session) map[string]replayEntry {
+	value, ok := session.Get(sessionKeyAuthorizeReplay).(string)
+	if !ok || value == "" {
+		return nil
+	}
+	var entries map[string]replayEntry
+	if err := json.Unmarshal([]byte(value), &entries); err != nil {
+		return nil
+	}
+	return entries
+}
+
+func setReplayEntry(session sessions.Session, arID string, entry replayEntry) {
+	entries := replayEntries(session)
+	if entries == nil {
+		entries = make(map[string]replayEntry)
+	}
+	// Drop expired entries so the session cookie doesn't accumulate stale
+	// redirects across many OAuth flows.
+	now := time.Now()
+	for id, e := range entries {
+		if id != arID && now.After(e.ExpiresAt) {
+			delete(entries, id)
+		}
+	}
+	entries[arID] = entry
+	data, _ := json.Marshal(entries)
+	session.Set(sessionKeyAuthorizeReplay, string(data))
+}
+
+// getReplayEntry returns the cached redirect URL for an already-answered
+// authorize request if one exists for this session and is still within the
+// replay window.
+func getReplayEntry(session sessions.Session, arID string) (string, bool) {
+	entry, ok := replayEntries(session)[arID]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		return "", false
+	}
+	return entry.RedirectURL, true
 }
 
 func (a *IDPRouter) handleToken(c *gin.Context) {
@@ -385,7 +545,7 @@ func (a *IDPRouter) handleRegister(c *gin.Context) {
 		Audience:      []string{a.externalURL},
 		Public:        isPublic,
 	}
-	if err := a.repo.RegisterClient(ctx, client); err != nil {
+	if err := a.repo.RegisterClient(ctx, client, req.ClientName); err != nil {
 		a.logger.Error("Failed to register client", zap.String("client_id", clientID), zap.Error(err))
 		c.JSON(500, gin.H{"error": "server_error", "error_description": err.Error()})
 		return

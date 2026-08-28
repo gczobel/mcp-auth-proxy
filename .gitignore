@@ -37,6 +37,7 @@ go.work.sum
 # Local build artifacts and Go caches (sandbox keeps $HOME caches read-only)
 bin/
 .go-cache/
+.go-env.sh
 
 # Editor/IDE
 .idea/
