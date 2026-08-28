@@ -1,0 +1,35 @@
+# Compose e2e smoke stack.
+#
+# Topology: the mcp-auth-proxy image runs in "stdio mode" — it spawns the
+# testserver fixture binary (built by CI, mounted read-only) as its backend and
+# exposes it over HTTP at /mcp. The smoke script then exercises the proxy the
+# way a client would:
+#
+#   host:8080 ──► proxy (:80, Bearer-gated) ── stdio ──► testserver (tools)
+#
+# The proxy auto-generates its JWT signing key at /data/private_key.pem on
+# first start; the smoke test reads it back out of the container to mint a
+# valid Bearer token (see e2e/tokengen) without an interactive OAuth flow.
+#
+# EXTERNAL_URL is the host-visible URL, so minted tokens (iss/aud) validate.
+services:
+  proxy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      EXTERNAL_URL: http://localhost:8080
+      NO_AUTO_TLS: "true"
+      PASSWORD: changeme
+      DATA_PATH: /data
+    command:
+      - --password
+      - changeme
+      - --no-auto-tls
+      - --
+      - /usr/local/bin/testserver
+    volumes:
+      # stdio backend fixture, built by CI before `docker compose up`.
+      - ./bin/testserver:/usr/local/bin/testserver:ro
+    ports:
+      - "8080:80"
