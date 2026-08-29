@@ -1,11 +1,12 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
+import { BASE, CALLBACK, PASSWORD } from './env';
 
 /**
  * Real-browser OAuth consent flow + replay window (#16).
  *
  * Drives an actual Chromium through: DCR registration -> password login ->
  * consent screen (asserts client name + redirect host render) -> Authorize ->
- * a repeat GET/POST to the approval URL (the Claude.ai connector behavior that
+ * a repeat GET/POST to the consent return URL (the Claude.ai connector behavior that
  * regressed in #16) must re-serve the SAME redirect with the SAME code ->
  * token exchange with the replayed code.
  *
@@ -15,10 +16,6 @@ import { test, expect, Page, APIRequestContext } from '@playwright/test';
  * The OAuth callback is observed via waitForURL (the redirect URI is what
  * Claude.ai would land back on), so the flow needs no real callback server.
  */
-
-const BASE = process.env.E2E_BASE_URL || 'http://localhost:8080';
-const CALLBACK = 'http://localhost:8080/callback';
-const PASSWORD = process.env.E2E_PASSWORD || 'changeme';
 
 interface Registration {
   client_id: string;
@@ -45,11 +42,14 @@ async function registerClient(
   return reg;
 }
 
+/** True when the browser has landed back on the client's callback URL. */
+function isCallbackURL(url: URL): boolean {
+  return url.href.startsWith(CALLBACK);
+}
+
 /** Extracts the authorization code from the callback URL after navigation. */
 async function waitForCallbackCode(page: Page, waitMs = 10_000): Promise<string> {
-  await page.waitForURL((url) => url.hostname === 'localhost' && url.pathname === '/callback', {
-    timeout: waitMs,
-  });
+  await page.waitForURL(isCallbackURL, { timeout: waitMs });
   const code = new URL(page.url()).searchParams.get('code') ?? '';
   if (!code) throw new Error('callback URL did not carry an authorization code');
   return code;
@@ -76,18 +76,21 @@ test('OAuth consent flow completes and repeat submissions replay the same code',
   // Step 3: consent screen renders client name + redirect host (MCP spec MUST).
   await expect(page.locator('h1')).toContainText('Authorize access', { timeout: 10_000 });
   await expect(page.locator('body')).toContainText('e2e-oauth-client is requesting access');
-  await expect(page.locator('body')).toContainText('localhost');
-  const approvalPath = new URL(page.url()).pathname;
-  expect(approvalPath).toMatch(/^\/\.idp\/auth\//);
+  const redirectHost = new URL(BASE).hostname;
+  await expect(page.locator('body')).toContainText(
+    `redirected to ${redirectHost} with an authorization code`,
+  );
+  const authorizeRequestPath = new URL(page.url()).pathname;
+  expect(authorizeRequestPath).toMatch(/^\/\.idp\/auth\//);
 
   // Step 4: Authorize -> browser is redirected to the callback with a code.
   await page.locator('button[name="decision"][value="authorize"]').click();
   const firstCode = await waitForCallbackCode(page);
 
-  // Step 5: the browser re-navigates to the approval URL (Claude.ai re-navigation
+  // Step 5: the browser re-navigates to the consent return URL (Claude.ai re-navigation
   // hypothesis). The session is now past the consent step; the replay window must
   // re-serve the SAME redirect with the SAME code instead of a 403.
-  await page.goto(`${BASE}${approvalPath}`);
+  await page.goto(`${BASE}${authorizeRequestPath}`);
   const replayCode = await waitForCallbackCode(page);
   expect(replayCode).toBe(firstCode);
 
@@ -122,20 +125,18 @@ test('consent screen Deny redirects to the client with access_denied and consume
   await page.locator('button[type="submit"]').click();
 
   await expect(page.locator('h1')).toContainText('Authorize access', { timeout: 10_000 });
-  const approvalPath = new URL(page.url()).pathname;
+  const authorizeRequestPath = new URL(page.url()).pathname;
   await page.locator('button[name="decision"][value="deny"]').click();
 
   // Deny redirects the user-agent back to the client with error=access_denied.
-  await page.waitForURL((url) => url.hostname === 'localhost' && url.pathname === '/callback', {
-    timeout: 10_000,
-  });
+  await page.waitForURL(isCallbackURL, { timeout: 10_000 });
   expect(new URL(page.url()).searchParams.get('error')).toBe('access_denied');
   expect(new URL(page.url()).searchParams.get('state')).toBe('deny-state');
 
   // The authorize request is consumed: a repeat submission from the same
   // session must not issue a code — the HTML error page (403) shows instead.
   // page.request shares the browser context's cookies.
-  const repeat = await page.request.post(`${BASE}${approvalPath}`, {
+  const repeat = await page.request.post(`${BASE}${authorizeRequestPath}`, {
     form: { decision: 'authorize' },
   });
   expect(repeat.status()).toBe(403);
