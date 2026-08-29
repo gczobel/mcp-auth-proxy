@@ -42,3 +42,6 @@ bin/
 # Editor/IDE
 .idea/
 # .vscode/
+.npm-cache/
+test-results/
+playwright-report/

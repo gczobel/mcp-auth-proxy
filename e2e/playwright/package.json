@@ -1,0 +1,14 @@
+{
+  "name": "mcp-auth-proxy-e2e",
+  "private": true,
+  "description": "Playwright e2e for mcp-auth-proxy: real-browser OAuth consent flow and container smoke assertions.",
+  "scripts": {
+    "test": "playwright test",
+    "test:oauth": "playwright test oauth-replay",
+    "test:smoke": "playwright test smoke"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.0",
+    "@types/node": "^22.20.1"
+  }
+}
