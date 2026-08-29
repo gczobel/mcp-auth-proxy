@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { BASE } from './env';
 
 /**
  * Container smoke assertions migrated from e2e/smoke.sh to Playwright's
@@ -6,8 +7,6 @@ import { test, expect } from '@playwright/test';
  * and the Bearer gate. The tool-schema relay and non-root-user checks stay
  * deferred in smoke.sh's successor issues (#18, #19).
  */
-
-const BASE = process.env.E2E_BASE_URL || 'http://localhost:8080';
 
 test('healthz is up', async ({ request }) => {
   const res = await request.get(`${BASE}/healthz`);
