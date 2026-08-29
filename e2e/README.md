@@ -2,8 +2,11 @@
 
 Black-box tests of the real proxy container, run on every PR and push to
 `main` via GitHub Actions (see `.github/workflows/e2e.yaml`). The suite is
-TypeScript + Playwright, following the upstream project's
-(`smart-mcp-proxy/mcpproxy-go`) e2e convention.
+TypeScript + Playwright. (Playwright was chosen over bash because the OAuth
+regression it guards — issue #16's double-navigation — is a browser-behavior
+bug best exercised by a real browser; the approach mirrors what
+`smart-mcp-proxy/mcpproxy-go` does for its OAuth e2e, though the projects are
+not related.)
 
 ## Topology
 

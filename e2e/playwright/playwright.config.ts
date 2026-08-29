@@ -8,8 +8,8 @@ import { defineConfig } from '@playwright/test';
  * http://localhost:8080) with PASSWORD=changeme.
  *
  * OAuth tests share one proxy instance and one browser session per test, so
- * parallel execution would cause session-state conflicts — upstream
- * (smart-mcp-proxy/mcpproxy-go) runs its OAuth e2e the same way.
+ * parallel execution would cause session-state conflicts (shared cookie jar
+ * and authorize-request bindings) — the suite must run single-worker.
  */
 export default defineConfig({
   testDir: '.',
