@@ -27,18 +27,6 @@ jobs:
           - name: mcp-auth-proxy-linux-arm64
             os: linux
             arch: arm64
-          - name: mcp-auth-proxy-darwin-amd64
-            os: darwin
-            arch: amd64
-          - name: mcp-auth-proxy-darwin-arm64
-            os: darwin
-            arch: arm64
-          - name: mcp-auth-proxy-windows-amd64.exe
-            os: windows
-            arch: amd64
-          - name: mcp-auth-proxy-windows-arm64.exe
-            os: windows
-            arch: arm64
 
     steps:
       - name: Checkout repository

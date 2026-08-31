@@ -36,8 +36,23 @@
 - Commits: Conventional Commits (feat, fix, docs, refactor, perf, test, build, ci, chore, revert). Example: `feat: add GitHub OAuth provider support`.
 - PRs: use `.github/pull_request_template.md` as the template; include a clear description, linked issues (`Fixes #123`), reproduction steps, and before/after notes. Include config snippets for new flags or env vars.
 - CI: ensure `gofmt` passes and tests are green.
+- **This repo is a fork** (`upstream` remote → `sigbit/mcp-auth-proxy`). `gh pr create`/`gh issue create` default to the upstream parent, not this fork — always pass `--repo gczobel/mcp-auth-proxy` explicitly. All PRs and issues for this project's own work belong on the fork, never upstream. A `.claude/settings.json` hook blocks `gh pr create`/`gh issue create` without `--repo` as a backstop, but don't rely on it — get the flag right.
 
 ## Security & Configuration Tips
 
 - Set `EXTERNAL_URL` correctly; accept TLS TOS with `--tls-accept-tos` when auto-TLS is detected.
 - Avoid committing contents of `data/` (runtime-only).
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (gczobel/mcp-auth-proxy), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
