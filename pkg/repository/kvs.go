@@ -168,8 +168,20 @@ func (r *kvsRepository) RevokeAccessToken(ctx context.Context, requestID string)
 	return r.delete(ctx, "access_token-"+requestID)
 }
 
-func (r *kvsRepository) RegisterClient(ctx context.Context, fositeClient fosite.Client) error {
-	return r.create(ctx, "client-"+fositeClient.GetID(), models.FromFositeClient(fositeClient))
+func (r *kvsRepository) RegisterClient(ctx context.Context, fositeClient fosite.Client, name string) error {
+	client := models.FromFositeClient(fositeClient)
+	client.Name = name
+	return r.create(ctx, "client-"+fositeClient.GetID(), client)
+}
+
+// GetClientName loads the display name of a client by its ID, or an empty
+// string when the client exists but was registered without a name.
+func (r *kvsRepository) GetClientName(ctx context.Context, id string) (string, error) {
+	var client models.Client
+	if err := r.get(ctx, "client-"+id, &client); err != nil {
+		return "", err
+	}
+	return client.Name, nil
 }
 
 // GetClient loads the client by its ID or returns an error

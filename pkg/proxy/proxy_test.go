@@ -588,6 +588,79 @@ func TestProxyRouter_ProtectedResourceTrailingSlash(t *testing.T) {
 	assert.Equal(t, []string{"https://example.com/"}, resp.AuthorizationServers)
 }
 
+func TestProxyRouter_ProtectedResourcePathDerivedDocument(t *testing.T) {
+	_, publicKey, err := generateRSAKeyPair()
+	require.NoError(t, err)
+
+	cases := []struct {
+		name         string
+		externalURL  string
+		wantResource string
+	}{
+		{
+			name:         "external url without trailing slash",
+			externalURL:  "https://example.com",
+			wantResource: "https://example.com/mcp",
+		},
+		{
+			name:         "external url with trailing slash",
+			externalURL:  "https://example.com/",
+			wantResource: "https://example.com/mcp",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			proxyRouter, err := NewProxyRouter(tt.externalURL, http.NotFoundHandler(), publicKey, http.Header{}, false, false, nil, "/userinfo")
+			require.NoError(t, err)
+
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			proxyRouter.SetupRoutes(router)
+
+			// The path-derived location (RFC 9728 §3.1) must be publicly
+			// reachable without a Bearer token and must advertise the exact
+			// resource the client connected to (§3.3).
+			req, err := http.NewRequest("GET", OauthProtectedResourceEndpoint+MCPResourcePath, nil)
+			require.NoError(t, err)
+
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var resp protectedResourceResponse
+			err = json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantResource, resp.Resource)
+			assert.Equal(t, []string{tt.externalURL}, resp.AuthorizationServers)
+		})
+	}
+}
+
+func TestProxyRouter_ProtectedResourceUnknownPathStaysGated(t *testing.T) {
+	_, publicKey, err := generateRSAKeyPair()
+	require.NoError(t, err)
+
+	proxyRouter, err := NewProxyRouter("https://example.com", http.NotFoundHandler(), publicKey, http.Header{}, false, false, nil, "/userinfo")
+	require.NoError(t, err)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	proxyRouter.SetupRoutes(router)
+
+	// Only the exact MCP resource path gets a public document; any other
+	// well-known path must remain behind the Bearer gate, not 200 with
+	// fabricated resource metadata.
+	req, err := http.NewRequest("GET", OauthProtectedResourceEndpoint+"/other", nil)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
 func TestProxyRouter_HTTPStreamingOnlyRejectsSSE(t *testing.T) {
 	privateKey, publicKey, err := generateRSAKeyPair()
 	require.NoError(t, err)
