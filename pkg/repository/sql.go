@@ -234,8 +234,8 @@ func (r *sqlRepository) RevokeAccessToken(ctx context.Context, requestID string)
 	return r.db.WithContext(ctx).Delete(&accessTokenSession{}, "signature = ?", requestID).Error
 }
 
-func (r *sqlRepository) RegisterClient(ctx context.Context, fositeClient fosite.Client) error {
-	data, err := marshalClient(fositeClient)
+func (r *sqlRepository) RegisterClient(ctx context.Context, fositeClient fosite.Client, name string) error {
+	data, err := marshalClient(fositeClient, name)
 	if err != nil {
 		return err
 	}
@@ -248,6 +248,24 @@ func (r *sqlRepository) RegisterClient(ctx context.Context, fositeClient fosite.
 	return r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{UpdateAll: true}).
 		Create(&record).Error
+}
+
+// GetClientName loads the display name of a client by its ID, or an empty
+// string when the client exists but was registered without a name.
+func (r *sqlRepository) GetClientName(ctx context.Context, id string) (string, error) {
+	var record clientRecord
+	if err := r.db.WithContext(ctx).First(&record, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", fosite.ErrNotFound
+		}
+		return "", fmt.Errorf("failed to load client: %w", err)
+	}
+
+	var client models.Client
+	if err := json.Unmarshal(record.Client, &client); err != nil {
+		return "", fmt.Errorf("failed to unmarshal client: %w", err)
+	}
+	return client.Name, nil
 }
 
 func (r *sqlRepository) GetClient(ctx context.Context, id string) (fosite.Client, error) {
@@ -362,8 +380,10 @@ func unmarshalRequest(data []byte, sess fosite.Session) (fosite.Requester, error
 	return fositeReq, nil
 }
 
-func marshalClient(client fosite.Client) ([]byte, error) {
-	data, err := json.Marshal(models.FromFositeClient(client))
+func marshalClient(client fosite.Client, name string) ([]byte, error) {
+	model := models.FromFositeClient(client)
+	model.Name = name
+	data, err := json.Marshal(model)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal client: %w", err)
 	}

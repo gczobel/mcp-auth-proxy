@@ -139,3 +139,76 @@ func TestSQLRepositoryUnsupportedDriver(t *testing.T) {
 		t.Fatalf("expected error for unsupported driver but got nil")
 	}
 }
+
+func TestGetClientName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		newRepo func() (Repository, error)
+	}{
+		{"kvs", func() (Repository, error) { return NewKVSRepository(t.TempDir()+"/clients.db", "test") }},
+		{"sql", func() (Repository, error) { return NewSQLRepository("sqlite", "file::memory:?cache=shared") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, err := tc.newRepo()
+			if err != nil {
+				t.Fatalf("failed to create repository: %v", err)
+			}
+			defer repo.Close()
+
+			ctx := context.Background()
+			client := &fosite.DefaultClient{
+				ID:           "client-name-test",
+				Secret:       []byte("secret"),
+				RedirectURIs: []string{"https://example.com/callback"},
+			}
+
+			if err := repo.RegisterClient(ctx, client, "Display Name"); err != nil {
+				t.Fatalf("RegisterClient failed: %v", err)
+			}
+			got, err := repo.GetClientName(ctx, "client-name-test")
+			if err != nil {
+				t.Fatalf("GetClientName failed: %v", err)
+			}
+			if got != "Display Name" {
+				t.Fatalf("expected name %q, got %q", "Display Name", got)
+			}
+
+			// Missing client surfaces fosite.ErrNotFound, matching the
+			// existing GetClient contract on both backends.
+			if _, err := repo.GetClientName(ctx, "missing"); err != fosite.ErrNotFound {
+				t.Fatalf("expected fosite.ErrNotFound for missing client, got %v", err)
+			}
+		})
+	}
+}
+
+func TestGetClientNameCorruptRecord(t *testing.T) {
+	repo, err := NewSQLRepository("sqlite", "file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	client := &fosite.DefaultClient{
+		ID:           "client-corrupt",
+		Secret:       []byte("secret"),
+		RedirectURIs: []string{"https://example.com/callback"},
+	}
+	if err := repo.RegisterClient(ctx, client, "Name"); err != nil {
+		t.Fatalf("RegisterClient failed: %v", err)
+	}
+
+	// Corrupt the stored client blob so unmarshal must fail.
+	raw, err := repo.(*sqlRepository).db.DB()
+	if err != nil {
+		t.Fatalf("failed to get underlying DB: %v", err)
+	}
+	if _, err := raw.Exec("UPDATE client_records SET client = 'not-json' WHERE id = ?", "client-corrupt"); err != nil {
+		t.Fatalf("failed to corrupt record: %v", err)
+	}
+
+	if _, err := repo.GetClientName(ctx, "client-corrupt"); err == nil {
+		t.Fatalf("expected error for corrupt client record, got nil")
+	}
+}

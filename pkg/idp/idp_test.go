@@ -2,6 +2,7 @@ package idp
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -290,9 +292,14 @@ func TestPrivateClient(t *testing.T) {
 // registerTestClient is a helper that registers a private OAuth client and returns the registration response.
 func registerTestClient(t *testing.T, serverURL string) registrationResponse {
 	t.Helper()
+	return registerTestClientWithName(t, serverURL, "Test OAuth Client")
+}
+
+func registerTestClientWithName(t *testing.T, serverURL, clientName string) registrationResponse {
+	t.Helper()
 
 	regReq := registrationRequest{
-		ClientName:              "Test OAuth Client",
+		ClientName:              clientName,
 		GrantTypes:              []string{"authorization_code", "refresh_token"},
 		ResponseTypes:           []string{"code"},
 		TokenEndpointAuthMethod: "client_secret_basic",
@@ -364,6 +371,371 @@ func testAuthFlowWithURL(t *testing.T, serverURL, authURL string) *url.URL {
 	return callbackURL
 }
 
+func TestReplayWindowDefaultIsTenSeconds(t *testing.T) {
+	require.Equal(t, 10*time.Second, replayWindow, "replay window default should stay 10s (design decision from issue #16)")
+}
+
+func TestAuthorizationReturnFormHandlesMissingAuthorizeRequest(t *testing.T) {
+	server, repo, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	// The session still holds the AR id, but the stored authorize request is
+	// gone (TTL expiry or the concurrent-consumption race from ADR-0002).
+	arID := strings.TrimPrefix(location, "/.idp/auth/")
+	require.NoError(t, repo.DeleteAuthorizeRequest(context.Background(), arID))
+
+	resp, err := client.Get(server.URL + location)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := resp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "missing authorize request should yield an HTML error page")
+}
+
+func TestAuthorizationReturnHandlesMissingAuthorizeRequest(t *testing.T) {
+	server, repo, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	arID := strings.TrimPrefix(location, "/.idp/auth/")
+	require.NoError(t, repo.DeleteAuthorizeRequest(context.Background(), arID))
+
+	resp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := resp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "missing authorize request should yield an HTML error page")
+}
+
+func TestAuthorizationReturnReplayExpiresAfterWindow(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	// Set the window in the past so the replay entry cached by the first POST
+	// is already expired when the retry arrives.
+	old := replayWindow
+	replayWindow = -1 * time.Second
+	t.Cleanup(func() { replayWindow = old })
+
+	firstResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer firstResp.Body.Close()
+	require.Contains(t, []int{http.StatusFound, http.StatusSeeOther}, firstResp.StatusCode)
+
+	secondResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer secondResp.Body.Close()
+	require.Equal(t, http.StatusForbidden, secondResp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := secondResp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "expired replay should return an HTML error page, not JSON")
+}
+
+func TestAuthorizationReturnDenyConsumesRequest(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	denyResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded",
+		strings.NewReader("decision=deny"))
+	require.NoError(t, err)
+	defer denyResp.Body.Close()
+	require.Equal(t, http.StatusSeeOther, denyResp.StatusCode)
+	require.Equal(t, "access_denied", urlMustParse(t, denyResp.Header.Get("Location")).Query().Get("error"))
+
+	// The authorize request is consumed by the denial: a repeat POST from the
+	// same session must not issue a code — it gets the HTML error page.
+	repeatResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded",
+		strings.NewReader("decision=authorize"))
+	require.NoError(t, err)
+	defer repeatResp.Body.Close()
+	require.Equal(t, http.StatusForbidden, repeatResp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := repeatResp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "repeat after deny should be an HTML error page")
+	require.NotContains(t, string(body[:n]), "error=access_denied", "no redirect to the client after the request is consumed")
+}
+
+func TestAuthorizationReturnDenyRedirectsWithAccessDenied(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	// Deny via the consent screen's Deny button
+	denyResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded",
+		strings.NewReader("decision=deny"))
+	require.NoError(t, err)
+	defer denyResp.Body.Close()
+	require.Equal(t, http.StatusSeeOther, denyResp.StatusCode)
+
+	denyLocation := denyResp.Header.Get("Location")
+	require.NotEmpty(t, denyLocation)
+	denyURL := urlMustParse(t, denyLocation)
+	require.Equal(t, "access_denied", denyURL.Query().Get("error"))
+	require.Equal(t, "test-state", denyURL.Query().Get("state"))
+}
+
+func TestConsentScreenShowsClientNameAndRedirectHost(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL) // ClientName: "Test OAuth Client"
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	consentResp, err := client.Get(server.URL + location)
+	require.NoError(t, err)
+	defer consentResp.Body.Close()
+	require.Equal(t, http.StatusOK, consentResp.StatusCode)
+
+	body := make([]byte, 4096)
+	n, _ := consentResp.Body.Read(body)
+	page := string(body[:n])
+
+	require.Contains(t, page, "Test OAuth Client", "consent screen should show the client name")
+	require.Contains(t, page, "localhost", "consent screen should show the redirect URI host")
+}
+
+func TestConsentScreenFallsBackToRedirectHostWithoutClientName(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClientWithName(t, server.URL, "")
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	consentResp, err := client.Get(server.URL + location)
+	require.NoError(t, err)
+	defer consentResp.Body.Close()
+	require.Equal(t, http.StatusOK, consentResp.StatusCode)
+
+	body := make([]byte, 4096)
+	n, _ := consentResp.Body.Read(body)
+	page := string(body[:n])
+
+	require.Contains(t, page, "localhost", "consent screen should show the redirect URI host when no client name is stored")
+}
+
+func TestAuthorizationReturnReplaysSameCodeOnRepeatedGet(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	// Complete the flow with a POST
+	postResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer postResp.Body.Close()
+	require.Contains(t, []int{http.StatusFound, http.StatusSeeOther}, postResp.StatusCode)
+	firstLocation := postResp.Header.Get("Location")
+	require.NotEmpty(t, firstLocation)
+
+	// A re-navigation to the approval URL (GET) within the replay window must
+	// re-serve the same redirect with the same code, not 403.
+	getResp, err := client.Get(server.URL + location)
+	require.NoError(t, err)
+	defer getResp.Body.Close()
+	require.Equal(t, http.StatusSeeOther, getResp.StatusCode)
+	require.Equal(t, firstLocation, getResp.Header.Get("Location"))
+}
+
+func TestAuthorizationReturnReplaysSameCodeOnSecondPost(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	regResp := registerTestClient(t, server.URL)
+
+	authURL := fmt.Sprintf("%s%s?response_type=code&client_id=%s&redirect_uri=%s&state=test-state",
+		server.URL, AuthorizationEndpoint, regResp.ClientID,
+		url.QueryEscape("http://localhost:8080/callback"))
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// Step 1: initiate the authorization flow and land on the consent screen
+	authResp, err := client.Get(authURL)
+	require.NoError(t, err)
+	defer authResp.Body.Close()
+	require.Contains(t, []int{http.StatusFound, http.StatusSeeOther}, authResp.StatusCode)
+	location := authResp.Header.Get("Location")
+	require.NotEmpty(t, location)
+
+	consentResp, err := client.Get(server.URL + location)
+	require.NoError(t, err)
+	defer consentResp.Body.Close()
+	require.Equal(t, http.StatusOK, consentResp.StatusCode)
+
+	// Step 2: first POST grants and redirects to the client with a code
+	firstResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer firstResp.Body.Close()
+	require.Contains(t, []int{http.StatusFound, http.StatusSeeOther}, firstResp.StatusCode)
+	firstLocation := firstResp.Header.Get("Location")
+	require.NotEmpty(t, firstLocation)
+	require.NotEmpty(t, urlMustParse(t, firstLocation).Query().Get("code"))
+
+	// Step 3: the same session re-POSTs (Claude.ai form-resubmission heuristic).
+	// It must re-serve the SAME redirect with the SAME code instead of 403.
+	secondResp, err := client.Post(server.URL+location, "application/x-www-form-urlencoded", nil)
+	require.NoError(t, err)
+	defer secondResp.Body.Close()
+	require.Equal(t, http.StatusSeeOther, secondResp.StatusCode)
+	require.Equal(t, firstLocation, secondResp.Header.Get("Location"))
+}
+
+func urlMustParse(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	return u
+}
+
 func TestAuthorizationReturnRequiresOriginalSession(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	regResp := registerTestClient(t, server.URL)
@@ -394,6 +766,9 @@ func TestAuthorizationReturnRequiresOriginalSession(t *testing.T) {
 	require.NoError(t, err)
 	defer victimResp.Body.Close()
 	require.Equal(t, http.StatusForbidden, victimResp.StatusCode)
+	body := make([]byte, 4096)
+	n, _ := victimResp.Body.Read(body)
+	require.Contains(t, string(body[:n]), "<html", "cross-session denial should be an HTML error page, not JSON")
 }
 
 func TestPublicClientRequiresPKCE(t *testing.T) {

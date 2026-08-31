@@ -21,7 +21,8 @@ type Repository interface {
 }
 
 type DynamicClientStorage interface {
-	RegisterClient(ctx context.Context, client fosite.Client) error
+	RegisterClient(ctx context.Context, client fosite.Client, name string) error
+	GetClientName(ctx context.Context, id string) (string, error)
 }
 
 type AuthorizeRequestStorage interface {
