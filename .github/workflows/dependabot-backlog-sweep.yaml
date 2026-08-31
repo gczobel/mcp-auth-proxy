@@ -1,6 +1,10 @@
 name: Dependabot backlog auto-merge sweep
 
 on:
+  # Catch dependabot PRs shortly after every merge to main, independent of the
+  # (unreliable) cron scheduler in this fork.
+  push:
+    branches: [main]
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
