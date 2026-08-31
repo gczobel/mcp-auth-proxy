@@ -1,0 +1,34 @@
+name: Dependabot backlog auto-merge sweep
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge for eligible open Dependabot PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The runner has no git checkout, so gh cannot infer the repository;
+          # pass it explicitly or the first gh call fails and the sweep does nothing.
+          repo="$GITHUB_REPOSITORY"
+          gh pr list --repo "$repo" --state open --author "app/dependabot" --json number,title --jq '.[] | [.number, .title] | @tsv' | \
+          while IFS=$'\t' read -r number title; do
+            old_major=$(echo "$title" | grep -oP 'from \Kv?[0-9]+' | head -1)
+            new_major=$(echo "$title" | grep -oP 'to \Kv?[0-9]+' | head -1)
+            if [ -n "$old_major" ] && [ -n "$new_major" ] && [ "$old_major" = "$new_major" ]; then
+              echo "PR #$number: no major-version change, enabling auto-merge"
+              gh pr merge --repo "$repo" --auto --squash "$number" || echo "::warning::failed to enable auto-merge for PR #$number"
+            else
+              echo "PR #$number: major bump or unparsable title, leaving for manual review"
+            fi
+          done
