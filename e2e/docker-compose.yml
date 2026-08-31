@@ -1,0 +1,33 @@
+# Compose e2e stack.
+#
+# Topology: the mcp-auth-proxy image runs in "stdio mode" — it spawns the
+# testserver fixture binary (built by CI, mounted read-only) as its backend and
+# exposes it over HTTP at /mcp. The Playwright suite (e2e/playwright/) then
+# exercises the proxy the way a client would — real browser OAuth flow and
+# container smoke assertions:
+#
+#   host:8080 ──► proxy (:80, Bearer-gated) ── stdio ──► testserver (tools)
+#
+# EXTERNAL_URL is the host-visible URL, so OAuth metadata and minted tokens
+# (iss/aud) validate.
+services:
+  proxy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      EXTERNAL_URL: http://localhost:8080
+      NO_AUTO_TLS: "true"
+      PASSWORD: changeme
+      DATA_PATH: /data
+    command:
+      - --password
+      - changeme
+      - --no-auto-tls
+      - --
+      - /usr/local/bin/testserver
+    volumes:
+      # stdio backend fixture, built by CI before `docker compose up`.
+      - ./bin/testserver:/usr/local/bin/testserver:ro
+    ports:
+      - "8080:80"
